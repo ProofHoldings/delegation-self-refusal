@@ -16,8 +16,9 @@
  */
 export function showcaseFooter(principal: string): string {
   return (
-    ` — This is the 3-tool Proof layer embedded in ${principal}'s server, not the full Proof MCP ` +
-    'server. The full server (`@proof-holdings/mcp-server`) adds the rest of the platform: ' +
+    ` — This is the 3-tool Proof layer embedded in this server, which names ${principal} as the ` +
+    'domain behind it — not the full Proof MCP server. The full server ' +
+    '(`@proof-holdings/mcp-server`) adds the rest of the platform: ' +
     'verification requests across SMS, messenger and biometric channels, HITL human approvals, ' +
     'delegation management, public profiles and API keys. Call `proof_connect` to get it.'
   );
@@ -42,14 +43,29 @@ export function showcaseConsequence(principal: string): string {
   );
 }
 
+/**
+ * Carried by every `configured: true` answer of `proof_check_this_server` (D6, 2026-10-01 live
+ * walkthrough). The tool runs inside the server it reports on, so whoever runs that server chooses
+ * the token it reads, the issuer it asks and the cache it answers from. What the answer can honestly
+ * offer is the artifact the token names, for the reader to hold against the one it actually reached
+ * — and a pointer OUTSIDE this server for a check its operator cannot influence. Not
+ * `proof_verify_delegation`: on this server it trusts the issuer this server was configured with.
+ */
+export const CHECK_THIS_SERVER_SELF_REPORT =
+  'Self-report: whoever runs this server controls what this answer says. A valid token does not ' +
+  'show that this server is the artifact the token names — compare `delegation.delegate` with the ' +
+  'address you connected to or the package you installed. For a check this server cannot ' +
+  'influence, verify the delegation outside it, against proof.holdings.';
+
 export function describeCheckThisServer(principal: string): string {
   return (
-    "Report whether THIS server's own Proof of Delegation — the attestation that " +
-    `${principal} authorized it to run — is still valid right now. Answers from the same cached ` +
-    'verdict the server enforces on itself, so it keeps answering even while every other tool ' +
-    'here is refusing. Use it when a tool call was refused and you need to know whether the ' +
-    'authorization was revoked, suspended or expired, or whether the issuer was merely ' +
-    `unreachable.${showcaseConsequence(principal)}${showcaseFooter(principal)}`
+    'Report whether the Proof of Delegation this server is configured with is still valid right ' +
+    'now and, when it can, which artifact and domain it names — compare the artifact with the ' +
+    'address you connected to or the package you installed, because a copied token reads valid ' +
+    'too. Answers from the same cached verdict the server enforces on itself, so it keeps ' +
+    'answering even while every other tool here is refusing. Use it when a tool call was refused ' +
+    'and you need to know whether the authorization was revoked, suspended or expired, or whether ' +
+    `the issuer was merely unreachable.${showcaseConsequence(principal)}${showcaseFooter(principal)}`
   );
 }
 

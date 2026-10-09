@@ -12,11 +12,10 @@ export interface ConnectInfo {
   remote_url?: string;
   remote_config?: unknown;
   install_command: string;
-  /** Why the npm route is the second choice while the published build lags the current surface. */
+  /** Why a client that resolved an older published build should prefer the remote route. */
   install_caveat?: string;
   docs_url: string;
   client_config?: unknown;
-  updated_at?: string;
   source: 'live' | 'offline_fallback';
 }
 
@@ -57,8 +56,20 @@ export const OFFLINE_FALLBACK: ConnectInfo = {
     mcpServers: { proof: { type: 'http', url: 'https://api.proof.holdings/mcp' } },
   },
   install_command: 'npx -y @proof-holdings/mcp-server',
+  // Names VERSIONS, never the registry's present contents. This string freezes into the
+  // publisher's node_modules at install time, so a claim about what npm carries "currently" cannot
+  // be corrected later — and the previous wording, which said the published build predated the
+  // delegation tools "until it is republished", went out inside a tarball and became false while
+  // sitting there. Phrased against a version number it stays true without any republish: a client
+  // that really did resolve 1.0.0 is still better served by remote_url.
+  //
+  // A LOCKSTEP COPY of the issuer's `INSTALL_CAVEAT` (`src/controllers/mcp.ts`) — this package
+  // shares no build graph with the backend, so the two are held equal by
+  // `src/__tests__/drift/mcp-showcase.test.ts` rather than by an import. The live answer from
+  // `GET /api/v1/mcp/connect` overrides this whenever the issuer is reachable; this copy is
+  // labelled `offline_fallback` so a reader can tell them apart.
   install_caveat:
-    'The @proof-holdings/mcp-server build currently on npm predates the delegation tools and the keyless public mode, so it exposes an older and smaller surface. Until it is republished, remote_url is the way to reach the current server.',
+    '@proof-holdings/mcp-server 1.0.0 (published 2026-02-27) predates the delegation tools and the keyless public mode, so it exposes an older and smaller surface; every later release carries them. A client still resolving 1.0.0 should use remote_url.',
   docs_url: 'https://proof.holdings/docs/mcp',
   source: 'offline_fallback',
 };
@@ -127,7 +138,6 @@ export async function fetchConnectInfo(
     ...(typeof body.install_caveat === 'string' ? { install_caveat: body.install_caveat } : {}),
     docs_url: typeof body.docs_url === 'string' ? body.docs_url : OFFLINE_FALLBACK.docs_url,
     ...(body.client_config !== undefined ? { client_config: body.client_config } : {}),
-    ...(typeof body.updated_at === 'string' ? { updated_at: body.updated_at } : {}),
     source: 'live',
   };
 }

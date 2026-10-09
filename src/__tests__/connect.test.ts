@@ -213,3 +213,18 @@ describe('fetchConnectInfo — carries the remote-connection route through to th
     expect(result.install_caveat).toBeUndefined();
   });
 });
+
+describe('fetchConnectInfo — carries no response timestamp into the agent\'s context', () => {
+  it('drops updated_at even when an older issuer still sends it', async () => {
+    // It was the issuer's response time, not a date for the content, so it read as a freshness claim
+    // nothing backed (live review 2026-09-26, M12). The issuer no longer sends it; an older deployment
+    // still may, and the whitelist is what keeps it out of the instructions an agent reads.
+    const fetchImpl = (async () =>
+      jsonResponse({ message: 'live copy', install_command: 'x', docs_url: 'y', updated_at: '2026-09-26T00:00:00.000Z' })) as unknown as typeof fetch;
+
+    const result = await fetchConnectInfo('https://api.proof.holdings', createBreaker(), fetchImpl);
+
+    expect(result.source).toBe('live');
+    expect(result).not.toHaveProperty('updated_at');
+  });
+});

@@ -8,13 +8,16 @@ import {
   MAX_ISSUER_REASON,
   refusalMessage,
 } from '../refusal.js';
+import { isDefaultBaseUrl } from '../poll.js';
 import { errorResult, jsonResult, type ToolResult } from '../result.js';
 import type { ToolRegistrar } from '../registrar.js';
 import { currentVerdict, type ResolvedOptions } from '../verdict.js';
 import { SHOWCASE_PER_REQUEST_TIMEOUT_MS, type Breaker } from './breaker.js';
+import { readDelegationClaims } from './claims.js';
 import { fetchConnectInfo } from './connect.js';
 import type { FetchLike } from './marked-fetch.js';
 import {
+  CHECK_THIS_SERVER_SELF_REPORT,
   describeCheckThisServer,
   describeConnect,
   describeVerifyDelegation,
@@ -80,6 +83,10 @@ export function isIssuerUnreachable(result: { valid: boolean; reason?: string })
   return !result.valid && typeof result.reason === 'string' && ISSUER_UNREACHABLE_REASONS.has(result.reason);
 }
 
+function isDefaultIssuer(baseUrl: string): boolean {
+  return isDefaultBaseUrl(baseUrl);
+}
+
 const delegateTypeEnum = z.enum(['url', 'purl']);
 
 /**
@@ -109,10 +116,39 @@ export function registerShowcase(tool: ToolRegistrar, ctx: ShowcaseContext): voi
       // the jittered grace schedule in schedule.ts and break the SEC-DLG-02 fix.
       const verdict = await currentVerdict(ctx.resolved);
 
+      // D6: `ctx.principal` is the publisher's CONFIGURED string and was all this answer ever
+      // named, so a copied token — or any valid token beside `principal: 'google.com'` — reported
+      // whatever was typed. The token's own claims replace it only beside a valid verdict while the
+      // DEFAULT issuer is configured: `baseUrl` is configuration too, and an issuer of the
+      // operator's choosing answers valid for a token of the operator's making — a forged identity
+      // that would then carry the "token" label. The cache is keyed per issuer, so a verdict another
+      // issuer answered is not served after a switch back; a file planted under the default issuer's
+      // name is the README's planted-cache bound, not something this check can see. In every other
+      // case the answer says where its principal came from instead of presenting it as identity.
+      const defaultIssuer = isDefaultIssuer(ctx.resolved.baseUrl);
+      const claims =
+        verdict.kind === 'valid' && defaultIssuer ? readDelegationClaims(ctx.resolved.token) : null;
+
       return jsonResult({
         configured: true,
-        principal: ctx.principal,
+        principal: claims ? claims.principal : ctx.principal,
+        principal_source: claims ? 'token' : 'configuration',
+        ...(claims && claims.principal.toLowerCase() !== ctx.principal.toLowerCase()
+          ? { principal_mismatch: true, configured_principal: ctx.principal }
+          : {}),
+        ...(defaultIssuer ? {} : { issuer_base_url: boundIssuerText(ctx.resolved.baseUrl, MAX_ISSUER_MESSAGE) }),
         valid: verdict.kind === 'valid',
+        ...(claims
+          ? {
+              delegation: {
+                principal: claims.principal,
+                delegate: claims.delegate,
+                scope: claims.scope,
+                delegation_id: claims.delegationId,
+                expires_at: claims.expiresAt,
+              },
+            }
+          : {}),
         // `message` is the raw diagnostic, and it is OURS more often than it looks: `verdict.ts`
         // writes it for both unreachable branches (grace exhaustion AND a cold start), and
         // `poll.ts` substitutes 'This delegation is not valid' whenever the issuer answers
@@ -135,6 +171,7 @@ export function registerShowcase(tool: ToolRegistrar, ctx: ShowcaseContext): voi
               refusal_message: refusalMessage(ctx.principal, verdict.reason),
             }
           : {}),
+        self_report: CHECK_THIS_SERVER_SELF_REPORT,
         checked_at: new Date().toISOString(),
       });
     },

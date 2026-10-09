@@ -11,10 +11,11 @@
  */
 export function showcaseInstructionsParagraph(principal: string): string {
   return (
-    `This server carries a Proof of Delegation from ${principal} — a signed attestation, ` +
-    `revocable at any time, that ${principal} authorized it to run. Call \`proof_check_this_server\` ` +
-    'to see whether that authorization currently holds, or `proof_verify_delegation` to check a ' +
-    'different server or agent artifact before trusting it; neither call requires an API key. ' +
+    `This server says it carries a Proof of Delegation from ${principal}, a signed attestation that ` +
+    'can be revoked at any time. Call `proof_check_this_server` to see whether it currently holds ' +
+    'and, where it can, which artifact and domain it actually names, or `proof_verify_delegation` ' +
+    'to check a different server or agent artifact before trusting it; neither call requires an ' +
+    'API key. ' +
     `Treat a refused or unverifiable status as a reason not to trust this server's authority to ` +
     `act on ${principal}'s behalf.`
   );

@@ -3,14 +3,21 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { isDefaultBaseUrl, normalizeBaseUrl } from './poll.js';
 import type { CacheEntry } from './types.js';
 
 export function defaultCacheDir(): string {
   return join(homedir(), '.proof-holdings', 'delegation-self-refusal');
 }
 
-function cacheFilePath(cacheDir: string, token: string): string {
-  const digest = createHash('sha256').update(token).digest('hex');
+/**
+ * One file per (token, issuer). The default issuer keeps the token-only name so an upgrade does not
+ * cost an installed server its grace state; any other `baseUrl` is part of the key, so a verdict one
+ * issuer answered is never served while the installation asks another.
+ */
+function cacheFilePath(cacheDir: string, token: string, baseUrl?: string): string {
+  const keyed = baseUrl === undefined || isDefaultBaseUrl(baseUrl) ? token : `${token}\n${normalizeBaseUrl(baseUrl)}`;
+  const digest = createHash('sha256').update(keyed).digest('hex');
   return join(cacheDir, `${digest}.json`);
 }
 
@@ -33,13 +40,13 @@ function isValidLastDecided(value: unknown): value is CacheEntry['lastDecided'] 
 }
 
 /**
- * Reads the cached verdict for this token. Returns null on a cold start (no file yet) or a
+ * Reads the cached verdict for this token and issuer (`baseUrl` omitted = the default issuer). Returns null on a cold start (no file yet) or a
  * corrupt/unreadable/unrecognized cache file — either way there is nothing usable to serve, so
  * the caller falls back to a live poll.
  */
-export function readCache(cacheDir: string, token: string): CacheEntry | null {
+export function readCache(cacheDir: string, token: string, baseUrl?: string): CacheEntry | null {
   try {
-    const raw = readFileSync(cacheFilePath(cacheDir, token), 'utf8');
+    const raw = readFileSync(cacheFilePath(cacheDir, token, baseUrl), 'utf8');
     const parsed = JSON.parse(raw) as CacheEntry;
     if (
       typeof parsed !== 'object' ||
@@ -56,7 +63,7 @@ export function readCache(cacheDir: string, token: string): CacheEntry | null {
   }
 }
 
-export function writeCache(cacheDir: string, token: string, entry: CacheEntry): void {
+export function writeCache(cacheDir: string, token: string, entry: CacheEntry, baseUrl?: string): void {
   mkdirSync(cacheDir, { recursive: true });
-  writeFileSync(cacheFilePath(cacheDir, token), JSON.stringify(entry), 'utf8');
+  writeFileSync(cacheFilePath(cacheDir, token, baseUrl), JSON.stringify(entry), 'utf8');
 }

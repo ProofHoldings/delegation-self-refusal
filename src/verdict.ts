@@ -46,9 +46,14 @@ export function resolveOptions(opts: GuardOptions & { token: string; fetchImpl?:
  * `console.error` (never `console.log`/stdout) is this repo's established safe channel for an
  * MCP stdio server, where stdout is the JSON-RPC transport itself (mcp/src/server.ts:96,100).
  */
-export function safeWriteCache(cacheDir: string, token: string, entry: Parameters<typeof writeCache>[2]): void {
+export function safeWriteCache(
+  cacheDir: string,
+  token: string,
+  entry: Parameters<typeof writeCache>[2],
+  baseUrl?: string,
+): void {
   try {
-    writeCache(cacheDir, token, entry);
+    writeCache(cacheDir, token, entry, baseUrl);
   } catch (error) {
     console.error(
       `delegation-self-refusal: failed to persist cache entry (continuing with the verdict already computed): ${
@@ -65,9 +70,11 @@ export function safeWriteCache(cacheDir: string, token: string, entry: Parameter
  * ValidVerdict/RefusedVerdict are ever served from cache.
  */
 export async function currentVerdict(opts: ResolvedOptions): Promise<ValidVerdict | RefusedVerdict> {
-  const cache = readCache(opts.cacheDir, opts.token);
+  const cache = readCache(opts.cacheDir, opts.token, opts.baseUrl);
   const interval = nextIntervalMs(opts.pollIntervalMs);
-  const dueForPoll = !cache || Date.now() - cache.lastCheckedAtMs >= interval;
+  // A check stamped in the future (the clock moved back) is not fresh: poll rather than wait it out.
+  const age = cache ? Date.now() - cache.lastCheckedAtMs : Infinity;
+  const dueForPoll = !cache || age < 0 || age >= interval;
 
   let result: PollResult;
   if (dueForPoll) {
@@ -83,7 +90,7 @@ export async function currentVerdict(opts: ResolvedOptions): Promise<ValidVerdic
       lastDecided: result,
       lastCheckedAtMs: Date.now(),
       consecutiveUnresolved: 0,
-    });
+    }, opts.baseUrl);
     return result;
   }
 
@@ -94,7 +101,7 @@ export async function currentVerdict(opts: ResolvedOptions): Promise<ValidVerdic
       lastDecided: cache.lastDecided,
       lastCheckedAtMs: Date.now(),
       consecutiveUnresolved: failures,
-    });
+    }, opts.baseUrl);
     return cache.lastDecided;
   }
 
@@ -114,6 +121,6 @@ export async function currentVerdict(opts: ResolvedOptions): Promise<ValidVerdic
     lastDecided: refusal,
     lastCheckedAtMs: Date.now(),
     consecutiveUnresolved: failures,
-  });
+  }, opts.baseUrl);
   return refusal;
 }

@@ -1,9 +1,16 @@
 # @proof-holdings/delegation-self-refusal
 
 A delegated MCP server enforces its own authorization. This package holds your Proof of
-Delegation token, polls the issuer on a jittered interval, caches the answer on disk, and gates
-your own tool dispatch — so a consumer who never checks anything still cannot get a tool call out
-of a server whose authorization has been revoked, suspended, or has expired.
+Delegation token, gates your own tool dispatch on it, and caches the issuer's answer on disk — so a
+consumer who never checks anything still cannot get a tool call out of a server whose authorization
+has been revoked, suspended, or has expired.
+
+The check runs on tool calls, not on a timer: every gated call, and the showcase's
+`proof_check_this_server` when `installProofLayer` is used. A call asks the issuer again only when
+the cached answer is older than a jittered interval (`pollIntervalMs`, 60s by default, plus up to
+20%); otherwise it is served from the cache. A server nobody is calling sends nothing. Nothing
+de-duplicates in-flight checks, so calls that arrive together after the cached answer has gone
+stale each ask — within one process, or across processes sharing the cache directory.
 
 ```bash
 npm install @proof-holdings/delegation-self-refusal
@@ -57,7 +64,7 @@ AND registers three tools:
 
 | Tool | What it does |
 | --- | --- |
-| `proof_check_this_server` | Reports whether THIS server's delegation is valid right now — and keeps answering while every other tool is refusing |
+| `proof_check_this_server` | Reports whether the delegation this server is configured with is valid right now, and which artifact and domain it names — and keeps answering while every other tool is refusing |
 | `proof_verify_delegation` | Verifies someone ELSE's Proof of Delegation. No API key |
 | `proof_connect` | Returns the current instructions for connecting the client to the full Proof MCP server |
 
@@ -100,9 +107,9 @@ Two properties are deliberate and worth knowing:
 
 The calls those two tools make carry an `X-Proof-Surface: showcase/<version>` header so
 proof.holdings can count them — a count of tool CALLS, not of installations. `installProofLayer`'s
-own periodic status poll carries the SAME header with a different, textually disjoint value,
-`layer/<version>`, never a `showcase/`-prefixed one: that is the denominator, one signal per
-installation that carries the showcase rather than one per call. A `guardDelegation` installation's
+own status poll (made on tool calls, as above) carries the SAME header with a different, textually
+disjoint value, `layer/<version>`, never a `showcase/`-prefixed one: that is the denominator, a signal
+from each installation that carries the showcase and is being called, rather than one per call. A `guardDelegation` installation's
 poll carries no header at all and is indistinguishable from any other caller of proof.holdings'
 public status endpoint.
 
@@ -120,6 +127,28 @@ that were happening anyway, and no request is made on its own.
 With no `token`, the three tools are still installed and nothing is gated;
 `proof_check_this_server` then reports `configured: false` rather than presenting the absence of a
 delegation as a valid one.
+
+When the delegation IS valid and the verdict came from the default issuer
+(`https://api.proof.holdings`), `proof_check_this_server` also returns `delegation` — the
+`principal`, `delegate`, `scope`, `delegation_id` and `expires_at` read from the token itself — and
+its top-level `principal` is the token's, with `principal_source: "token"`. The `principal` you pass
+to `installProofLayer` is a label — your refusal sentences, the three tool descriptions and the
+`initialize` instructions all name it — not evidence of anything: when it differs from the token's
+(ignoring letter case), the answer says so with `principal_mismatch: true` and
+`configured_principal`. Otherwise no `delegation` is returned and `principal_source` is
+`"configuration"`: on any other verdict the claims are not read, and a token whose principal or
+delegate is not in the form the issuer mints is read and rejected rather than repaired (the scope
+is returned in canonical order). While a `baseUrl` other than the default is configured, the claims
+stay locked and that `baseUrl` is echoed as `issuer_base_url`, because an issuer you chose can
+answer valid for a token you made. The cache is keyed per issuer, so a verdict such an issuer left
+in `cacheDir` is not served after `baseUrl` is switched back; a file planted under the default
+issuer's name is the planted-cache case below. Every configured answer also carries `self_report`: this
+tool runs inside the server it reports on, so whoever runs that server controls what it says. What
+it can honestly offer is the artifact the token names, for the reader to compare with the address
+it connected to or the package it installed — and a check made OUTSIDE this server, against
+proof.holdings, is the one its operator cannot influence. That closes a copied token run through
+this package unmodified with the default issuer; the cases that remain are listed under
+[What this cannot protect against](#what-this-cannot-protect-against).
 
 When the delegation is NOT valid, `proof_check_this_server` returns `reason`, `message` and
 `refusal_message` about it — named rather than counted, because a number typed beside a list drifts
@@ -230,6 +259,14 @@ process can force a different, adversarial version of that process to check anyt
 Verification that does not depend on the server's own cooperation is a separate concern, tracked
 under Proof Holdings' own MCP checker.
 
+The same bound covers what `proof_check_this_server` reports. Its answer is only as honest as the
+process giving it: an operator can, for example, edit the code, or — without editing anything —
+plant a cache file (`cacheDir`) holding a valid verdict for a token of their own making under the
+default issuer's file name, and the answer will name
+that token's claims with `principal_source: "token"`. Nothing inside the process can tell a planted
+verdict from a real one. Treat the self-check as the publisher's own instrument, and verify a server
+you do not run from outside it.
+
 Both public MCP SDK registration entry points — `server.tool()` and `server.registerTool()` — are
 gated identically. A publisher who later calls the SDK's own `registeredTool.update()` to redefine
 a tool's callback after registration bypasses the gate for that tool, the same way editing any
@@ -242,7 +279,8 @@ For a `url` artifact (you operate the server), the poll leaves **your** infrastr
 different from any other outbound call your service already makes.
 
 For a `purl` artifact (a package a consumer installs and runs themselves), the poll leaves the
-**consumer's** network, every interval, for as long as their process runs. Air-gapped and
+**consumer's** network — only while their tools are being called: about once per interval at the
+default, more often when calls arrive together after the cached answer has gone stale. Air-gapped and
 egress-filtered deployments are **permanently denied, not degraded**: the on-disk grace window
 only extends the *last good answer already obtained*, and a first run has none to extend — a
 brand-new install with no cached verdict and no reachable issuer refuses on its very first tool
@@ -253,8 +291,10 @@ call. There is no offline mode.
 Two things bypass this mechanism entirely, and neither requires touching the delegated server's
 code:
 
-- **Rolling the system clock backward.** The grace window is measured against wall-clock time;
-  an operator or a compromised host that can move the clock can extend it indefinitely.
+- **Stopping or slowing the system clock.** The grace window is measured against wall-clock time;
+  an operator or a compromised host that holds the clock still, or slows it, can extend it
+  indefinitely. Rolling it backward does not: a cached check stamped later than now is treated as
+  due for a poll.
 - **Replaying a stale cache file.** The on-disk cache is a plain JSON file. Restoring an older
   copy (from a backup, a snapshot, a container image built before revocation) restores whatever
   verdict was cached at that point.

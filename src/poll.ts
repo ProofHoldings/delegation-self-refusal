@@ -3,6 +3,15 @@ import type { PollResult } from './types.js';
 export const DEFAULT_BASE_URL = 'https://api.proof.holdings';
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
+/** One spelling per issuer: trailing slashes stripped, lowercased. */
+export function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '').toLowerCase();
+}
+
+export function isDefaultBaseUrl(baseUrl: string): boolean {
+  return normalizeBaseUrl(baseUrl) === DEFAULT_BASE_URL;
+}
+
 /**
  * A `valid: false` reason the issuer can hand back that is NOT a definitive answer — it means
  * the issuer's own registry lookup failed, not that the delegation was checked and rejected.

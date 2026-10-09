@@ -42,6 +42,26 @@ describe('cache', () => {
     expect(readCache(dir, 'tok-b')).toBeNull();
   });
 
+  it('keeps the default issuer on the token-only file name (an upgrade keeps its grace state)', () => {
+    const entry: CacheEntry = { lastDecided: { kind: 'valid' }, lastCheckedAtMs: 7, consecutiveUnresolved: 0 };
+    const legacy = join(dir, `${createHash('sha256').update('tok').digest('hex')}.json`);
+    writeFileSync(legacy, JSON.stringify(entry), 'utf8');
+
+    expect(readCache(dir, 'tok')).toEqual(entry);
+    expect(readCache(dir, 'tok', 'https://api.proof.holdings')).toEqual(entry);
+    expect(readCache(dir, 'tok', 'https://API.proof.holdings/')).toEqual(entry);
+  });
+
+  it('keys a non-default issuer by token and normalized baseUrl', () => {
+    const entry: CacheEntry = { lastDecided: { kind: 'valid' }, lastCheckedAtMs: 7, consecutiveUnresolved: 0 };
+    writeCache(dir, 'tok', entry, 'https://issuer.example');
+
+    expect(readCache(dir, 'tok')).toBeNull();
+    expect(readCache(dir, 'tok', 'https://other.example')).toBeNull();
+    expect(readCache(dir, 'tok', 'https://issuer.example')).toEqual(entry);
+    expect(readCache(dir, 'tok', 'https://ISSUER.example//')).toEqual(entry);
+  });
+
   it('creates the cache directory on first write', () => {
     const nested = join(dir, 'does', 'not', 'exist', 'yet');
     writeCache(nested, 'tok', {

@@ -1,6 +1,6 @@
 {
   "name": "@proof-holdings/delegation-self-refusal",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "A delegated MCP server that refuses its own tool calls once its Proof of Delegation is revoked, suspended, or expired — self-enforcement, not consumer verification",
   "type": "module",
   "license": "MIT",

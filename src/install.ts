@@ -15,7 +15,7 @@ import { registerShowcase, SHOWCASE_TOOL_NAMES } from './showcase/tools.js';
 import { showcaseInstructionsParagraph } from './showcase/instructions.js';
 
 /** Version reported in the `X-Proof-Surface` header. Kept in lockstep with package.json by a drift test. */
-export const SHOWCASE_VERSION = '0.1.0';
+export const SHOWCASE_VERSION = '0.1.2';
 
 export interface InstallProofLayerOptions extends GuardOptions {}
 
