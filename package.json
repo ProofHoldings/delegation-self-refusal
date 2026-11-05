@@ -1,7 +1,7 @@
 {
   "name": "@proof-holdings/delegation-self-refusal",
-  "version": "0.1.2",
-  "description": "A delegated MCP server that refuses its own tool calls once its Proof of Delegation is revoked, suspended, or expired — self-enforcement, not consumer verification",
+  "version": "0.3.0",
+  "description": "A delegated MCP server refuses its own tool calls once its Proof of Delegation is revoked, suspended or expired, and reports its status through one proof_holdings_status tool",
   "type": "module",
   "license": "MIT",
   "author": "proof.holdings <hello@proof.holdings> (https://proof.holdings)",
@@ -61,7 +61,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@proof-holdings/delegation-verifier": "^0.1.0"
+    "@proof-holdings/delegation-verifier": "^0.2.0"
   },
   "publishConfig": {
     "access": "public"

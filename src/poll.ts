@@ -1,83 +1,98 @@
-import type { PollResult } from './types.js';
+import { SURFACE_HEADER, SURFACE_VALUE, TRIGGER_HEADER } from './constants.js';
+import { classifyPollAnswer, type PollResult, type UnresolvedReason } from './reasons.js';
 
-export const DEFAULT_BASE_URL = 'https://api.proof.holdings';
-export const DEFAULT_TIMEOUT_MS = 10_000;
+export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+export type PollTrigger = 'gate' | 'status';
 
-/** One spelling per issuer: trailing slashes stripped, lowercased. */
-export function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, '').toLowerCase();
+const TLS_ERROR_CODES = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+]);
+
+export function joinUrl(baseUrl: string, path: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}${path}`;
 }
 
-export function isDefaultBaseUrl(baseUrl: string): boolean {
-  return normalizeBaseUrl(baseUrl) === DEFAULT_BASE_URL;
+/** Headers every poll and pull carries; a status poll adds the trigger (§ 12). */
+export function surfaceHeaders(trigger?: PollTrigger): Record<string, string> {
+  const headers: Record<string, string> = { [SURFACE_HEADER]: SURFACE_VALUE };
+  if (trigger === 'status') headers[TRIGGER_HEADER] = 'status';
+  return headers;
 }
 
-/**
- * A `valid: false` reason the issuer can hand back that is NOT a definitive answer — it means
- * the issuer's own registry lookup failed, not that the delegation was checked and rejected.
- * Mirrors `packages/delegation-verifier/src/status.ts`, which fails the same way closed for the
- * identical reason on the read-only verification side.
- */
-const UNRESOLVED_REASON = 'status_unavailable';
+export function transportReason(error: unknown, timedOut: boolean): UnresolvedReason {
+  if (timedOut) return 'timeout';
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && TLS_ERROR_CODES.has(code)) return 'tls_error';
+    current = (current as { cause?: unknown }).cause;
+  }
+  return 'network_error';
+}
 
-/**
- * Polls `POST {baseUrl}/api/v1/proofs/validate` with the delegation token and maps the response
- * to a PollResult. Never sends `identifier` — a delegation has none to bind against
- * (src/controllers/proofs.ts validateDelegationBranch rejects that combination outright).
- */
-export async function pollDelegationStatus(
-  token: string,
-  baseUrl: string = DEFAULT_BASE_URL,
-  fetchImpl: typeof fetch = fetch,
-  timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<PollResult> {
-  let response: Response;
+/** A fetch bounded by a timer the caller's clock controls, so fake timers can drive it. */
+export async function boundedFetch<T>(
+  fetchImpl: FetchLike,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  read: (response: Response) => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; reason: UnresolvedReason }> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    response = await fetchImpl(`${baseUrl}/api/v1/proofs/validate`, {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    return { ok: true, value: await read(response) };
+  } catch (error) {
+    return { ok: false, reason: transportReason(error, timedOut) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface PollOptions {
+  baseUrl: string;
+  timeoutMs: number;
+  trigger: PollTrigger;
+  fetch?: FetchLike;
+}
+
+/** `POST {baseUrl}/api/v1/proofs/validate`, classified (§ 4). Never throws. */
+export async function pollValidate(token: string, options: PollOptions): Promise<PollResult> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => fetch(input, init));
+  const outcome = await boundedFetch(
+    fetchImpl,
+    joinUrl(options.baseUrl, '/api/v1/proofs/validate'),
+    {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...surfaceHeaders(options.trigger) },
       body: JSON.stringify({ proof_token: token }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch {
-    return { kind: 'unresolved' };
-  }
-
-  if (!response.ok) {
-    return { kind: 'unresolved' };
-  }
-
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return { kind: 'unresolved' };
-  }
-
-  if (typeof body !== 'object' || body === null) {
-    return { kind: 'unresolved' };
-  }
-
-  const parsed = body as { valid: unknown; reason?: unknown; message?: unknown };
-
-  // Strict boolean check, not presence + truthy — mirrors
-  // packages/delegation-verifier/src/status.ts's `typeof body.valid !== 'boolean'` gate on the
-  // identical backend contract. A non-boolean `valid` is a response this package cannot trust.
-  if (typeof parsed.valid !== 'boolean') {
-    return { kind: 'unresolved' };
-  }
-
-  if (parsed.valid) {
-    return { kind: 'valid' };
-  }
-
-  if (parsed.reason === UNRESOLVED_REASON) {
-    return { kind: 'unresolved' };
-  }
-
-  return {
-    kind: 'refused',
-    reason: typeof parsed.reason === 'string' ? parsed.reason : 'invalid',
-    message: typeof parsed.message === 'string' ? parsed.message : 'This delegation is not valid',
-  };
+      redirect: 'error',
+    },
+    options.timeoutMs,
+    async (response) => {
+      const text = await response.text();
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = undefined;
+      }
+      return { httpStatus: response.status, body };
+    },
+  );
+  if (!outcome.ok) return { kind: 'unresolved', reason: outcome.reason };
+  return classifyPollAnswer(outcome.value);
 }

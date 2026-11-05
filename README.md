@@ -1,27 +1,17 @@
 # @proof-holdings/delegation-self-refusal
 
 A delegated MCP server enforces its own authorization. This package holds your Proof of
-Delegation token, gates your own tool dispatch on it, and caches the issuer's answer on disk — so a
-consumer who never checks anything still cannot get a tool call out of a server whose authorization
-has been revoked, suspended, or has expired.
-
-The check runs on tool calls, not on a timer: every gated call, and the showcase's
-`proof_check_this_server` when `installProofLayer` is used. A call asks the issuer again only when
-the cached answer is older than a jittered interval (`pollIntervalMs`, 60s by default, plus up to
-20%); otherwise it is served from the cache. A server nobody is calling sends nothing. Nothing
-de-duplicates in-flight checks, so calls that arrive together after the cached answer has gone
-stale each ask — within one process, or across processes sharing the cache directory.
+Delegation token, gates your server's tool calls on it, and caches the issuer's answer on disk — so
+a consumer who never checks anything still cannot get a tool call out of a server whose
+authorization has been revoked, suspended, or has expired.
 
 ```bash
 npm install @proof-holdings/delegation-self-refusal
 ```
 
-Node ≥ 18. One runtime dependency (`@proof-holdings/delegation-verifier`, itself dependency-free)
-and one peer dependency (`zod`, which your MCP SDK already installs). The GATE uses neither — but
-be precise about what that means: both are loaded when you `import` from this package at all,
-because the package index re-exports the optional Proof layer described below. In practice this
-costs nothing (every MCP SDK install already brings `zod`), but "the gate needs no dependencies"
-would be false as written.
+Node ≥ 18. One runtime dependency (`@proof-holdings/delegation-verifier`, itself dependency-free,
+used to verify a re-signed token after a signing-key revocation) and one peer dependency (`zod`,
+which your MCP SDK already installs, used for the status tool's output schema).
 
 ## What this is not
 
@@ -30,224 +20,164 @@ issuer-agnostic package a caller runs to check *your* delegation before trusting
 package is the opposite direction: it runs inside *your own* server so that when your own
 delegation stops being valid, your server stops itself — whether or not the caller ever asked.
 
+## Setup
+
+Setup has two steps, and both are required.
+
+1. **Publish the token** where readers look for it: in your MCP `server.json` under
+   `_meta["holdings.proof/delegation"]`, in an A2A agent card as a `capabilities.extensions[]`
+   entry with `uri: "https://proof.holdings/delegation"`, or through the `_mcp.<domain>` DNS
+   pointer, which names such a card. The delegation page of your Proof dashboard prints the exact
+   snippet for your token. Directories, `npx @proof-holdings/proof-check` and verifying clients read
+   the published token whatever this package does, so a server that installs the gate without
+   publishing is invisible to them.
+2. **Install the gate** in the server itself, as below.
+
 ## Usage
 
-Replace the one line where you bind your tool registrar:
+One call, after you create the server. Tools may be registered before or after it.
 
 ```ts
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { guardDelegation } from '@proof-holdings/delegation-self-refusal';
+import { installProofHoldings } from '@proof-holdings/delegation-self-refusal';
 
 const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 
-// Was: const tool = server.tool.bind(server);
-const tool = guardDelegation(server, {
-  token: process.env.DELEGATION_TOKEN,   // omit/empty to disable the gate entirely
-  principal: 'example.com',              // the domain named in the refusal message
-  artifactType: 'url',                   // 'url' (you operate the server) or 'purl' (consumers install it)
+installProofHoldings(server, {
+  token: process.env.DELEGATION_TOKEN, // omit or leave empty to gate nothing
 });
 
-registerMyTools(tool, http); // unchanged — every module still receives a ToolRegistrar
+registerMyTools(server); // unchanged
 ```
 
-`guardDelegation` **must run before any `server.tool()`/`registerTool()` call.** Registering a
-tool first and calling `guardDelegation` with a token afterward throws — a gate installed too late
-to see a call it was supposed to guard would otherwise silently protect nothing. With NO token the
-opt-out returns before that check runs and nothing is thrown, because nothing was going to be
-gated; that path is silent by design and is the one state this rule cannot warn you about.
+| Option | Default | Meaning |
+|---|---|---|
+| `token` | none | The delegation token. Absent or empty: nothing is gated, no instructions line is added, and the status tool reports `not_configured`. |
+| `pollIntervalMs` | `300000` | How long a cached answer is served without asking again. A lower value is raised to `60000`; anything but a finite number throws. |
+| `cacheDir` | `PROOF_CACHE_DIR`, else `~/.proof-holdings/delegation-self-refusal` | Where verdicts are kept between processes. |
+| `baseUrl` | `https://api.proof.holdings` | The issuer's API. |
 
-## Optional: install the Proof layer instead
+The principal, delegate and expiry are read from the token; there is nothing else to configure.
 
-`installProofLayer` is the alternative to `guardDelegation` for a publisher who also wants their
-users to be able to see Proof from inside the server they already have. It installs the same gate
-AND registers three tools:
+`installProofHoldings` does three things:
 
-| Tool | What it does |
-| --- | --- |
-| `proof_check_this_server` | Reports whether the delegation this server is configured with is valid right now, and which artifact and domain it names — and keeps answering while every other tool is refusing |
-| `proof_verify_delegation` | Verifies someone ELSE's Proof of Delegation. No API key |
-| `proof_connect` | Returns the current instructions for connecting the client to the full Proof MCP server |
+- **Gates `tools/call`.** It wraps the SDK's own `tools/call` handler, so every tool is gated —
+  whenever it was registered — and a refusal is returned before the SDK validates the call's
+  arguments. If the installed SDK does not expose that handler where this package expects it and a
+  token is configured, the call throws rather than leaving your tools ungated. Calling it twice on
+  one server throws. Servers built per request or per session in one process share one gate state
+  for the same token, `baseUrl`, `cacheDir` and effective poll interval.
+- **Registers `proof_holdings_status`.** A read-only tool, outside the gate, that reports the
+  delegation's status, principal, delegate, expiry, and when Proof last answered. It answers from
+  the cache, and asks Proof afresh at most once a minute per process.
+- **Adds one line to your server's instructions** (with a token):
+  `Verified by Proof Holdings (delegated by example.com). Call proof_holdings_status for details.`
 
-```ts
-import { installProofLayer } from '@proof-holdings/delegation-self-refusal';
+With a token, it also rewrites the SDK's input-validation errors for your own tools (`MCP error -32602: …`) into
+the same JSON envelope as a refusal, with `error: "invalid_arguments"`, the message cut at 200
+characters and any copy of your token replaced with `[redacted]`. Every other result of your tools
+passes through unchanged.
 
-const tool = installProofLayer(server, {
-  token: process.env.DELEGATION_TOKEN,
-  principal: 'example.com',
-  artifactType: 'url',
-});
-```
+## When it asks Proof
 
-Call it **instead of** `guardDelegation`, not in addition to it — it includes the gate, and a
-second install throws. The same "before any registration" rule applies, and here it applies
-UNCONDITIONALLY: `installProofLayer` runs the check with or without a token, since it registers the
-three tools either way.
+The check runs on tool calls, never on a timer, so a server nobody is calling sends nothing. With
+`I` the poll interval:
 
-Two properties are deliberate and worth knowing:
+- an answer younger than `I` is served as it is;
+- between `I` and `3 × I` it is served, and the call starts one background refresh;
+- older than that, or with no answer at all, the call waits for one attempt of at most 4 seconds
+  (with no answer at all and a first attempt that fails: one more attempt a second after it).
 
-- **`proof_check_this_server` is not gated.** It is the tool that reports a revocation, so gating
-  it would kill it in exactly the situation it exists for. It is registered through the original
-  registrar before the gate is installed. **Whenever a token is configured**, that un-gated
-  registrar is never returned or exported, because routing your own tool through it would silently
-  disable your self-enforcement while the installation still looked correct from outside. With no
-  token there is no gate to bypass, and the call returns exactly that raw registrar — the same
-  thing `guardDelegation`'s opt-out hands back.
-- **The two outbound showcase tools call out on their own budget.** `proof_verify_delegation` and
-  `proof_connect` are bounded at 4.5s end to end per call — below the verifier's own 5s default —
-  because unlike the gate they have no grace window and run synchronously inside your users'
-  calls. `proof_connect` makes ONE request and that figure is its only bound.
-  `proof_verify_delegation` walks up to three sequential requests, so it additionally caps each
-  individual fetch at 1125 ms, derived from the total rather than equal to it. Each of the two has
-  its OWN circuit breaker, so a dead issuer cannot be hidden by the other tool's successes.
-  `proof_check_this_server` is deliberately outside all of this: it reads the same verdict the gate
-  reads, so any poll it triggers runs on the gate's 10s timeout and its grace schedule, not on the
-  showcase budget. If proof.holdings is unreachable, `proof_connect`
-  serves a packaged copy of the instructions clearly labelled `offline_fallback`, and
-  `proof_verify_delegation` answers `unconfirmed` — never a negative verdict about the artifact.
+Calls that arrive while an attempt is in flight share it; at most one background refresh runs at a
+time.
 
-The calls those two tools make carry an `X-Proof-Surface: showcase/<version>` header so
-proof.holdings can count them — a count of tool CALLS, not of installations. `installProofLayer`'s
-own status poll (made on tool calls, as above) carries the SAME header with a different, textually
-disjoint value, `layer/<version>`, never a `showcase/`-prefixed one: that is the denominator, a signal
-from each installation that carries the showcase and is being called, rather than one per call. A `guardDelegation` installation's
-poll carries no header at all and is indistinguishable from any other caller of proof.holdings'
-public status endpoint.
+**How fast a revocation lands:** ≤ ~6 min after revocation while Proof is reachable, plus at most
+one call within 3× the interval. At the default interval, while Proof is reachable: a revoked
+delegation is refused within about six minutes of active use, at most one more call runs, and only
+within 15 minutes of the last answer — never after a day idle, because an answer older than `3 × I`
+is not served while a fresh one can be had.
 
-What rides alongside the header differs by call, and none of them carries anything beyond what
-that call was already sending. The layer poll always carries THIS installation's own delegation
-token (`pollDelegationStatus` posts `{proof_token: token}`) — there the marker binds "this install
-carries the showcase" to a request that already identifies the installation, and adds nothing else.
-`proof_connect`'s marked call is a bare `GET` with no body at all — the header is everything it
-adds, not even a token rides with it. `proof_verify_delegation`'s marked call carries whatever card
-or token the CALLER supplied, to check SOMEONE ELSE's delegation — never this installation's own,
-and no different from what that call already sent before this header existed. In every case:
-no identity, no argument, nothing about you or your users is added by the marker — it rides calls
-that were happening anyway, and no request is made on its own.
+The token's own `exp` is checked locally on every call, first: past `exp` plus five minutes the call
+is refused as `expired` whatever the cache or Proof says.
 
-With no `token`, the three tools are still installed and nothing is gated;
-`proof_check_this_server` then reports `configured: false` rather than presenting the absence of a
-delegation as a valid one.
-
-When the delegation IS valid and the verdict came from the default issuer
-(`https://api.proof.holdings`), `proof_check_this_server` also returns `delegation` — the
-`principal`, `delegate`, `scope`, `delegation_id` and `expires_at` read from the token itself — and
-its top-level `principal` is the token's, with `principal_source: "token"`. The `principal` you pass
-to `installProofLayer` is a label — your refusal sentences, the three tool descriptions and the
-`initialize` instructions all name it — not evidence of anything: when it differs from the token's
-(ignoring letter case), the answer says so with `principal_mismatch: true` and
-`configured_principal`. Otherwise no `delegation` is returned and `principal_source` is
-`"configuration"`: on any other verdict the claims are not read, and a token whose principal or
-delegate is not in the form the issuer mints is read and rejected rather than repaired (the scope
-is returned in canonical order). While a `baseUrl` other than the default is configured, the claims
-stay locked and that `baseUrl` is echoed as `issuer_base_url`, because an issuer you chose can
-answer valid for a token you made. The cache is keyed per issuer, so a verdict such an issuer left
-in `cacheDir` is not served after `baseUrl` is switched back; a file planted under the default
-issuer's name is the planted-cache case below. Every configured answer also carries `self_report`: this
-tool runs inside the server it reports on, so whoever runs that server controls what it says. What
-it can honestly offer is the artifact the token names, for the reader to compare with the address
-it connected to or the package it installed — and a check made OUTSIDE this server, against
-proof.holdings, is the one its operator cannot influence. That closes a copied token run through
-this package unmodified with the default issuer; the cases that remain are listed under
-[What this cannot protect against](#what-this-cannot-protect-against).
-
-When the delegation is NOT valid, `proof_check_this_server` returns `reason`, `message` and
-`refusal_message` about it — named rather than counted, because a number typed beside a list drifts
-the moment the list grows and nothing here would go red.
-`reason` is the issuer's machine code and `message` its own sentence — but both are OURS more
-often than that suggests. This package writes `message` in the two unreachable branches (a cold
-start and an exhausted grace window), and it substitutes either field INDEPENDENTLY when the issuer
-omits it — `invalid` for a missing reason, "This delegation is not valid" for a missing message. Both are
-TRUNCATED past a bound (code-sized for `reason`, prose-sized for `message`), because whatever the
-issuer sends lands in the calling agent's context. `refusal_message` beside them is never
-substituted and never the issuer's: it is the exact sentence your gated tools are returning to
-their callers right now, from the same function, not a paraphrase.
-
-So `invalid` has more than one source and they read differently: usually the issuer asserting it,
-with a specific `message` (bad signature, unsupported schema version, missing claims) — read that
-message, it is the diagnostic. Only when `message` is our substituted sentence does `invalid` mean
-"the issuer did not tell us why". The two fields are substituted INDEPENDENTLY, so there is a third
-cell the split above would hide: a reply carrying a real `message` and no `reason` at all shows our
-substituted `invalid` beside the issuer's own sentence. The instruction does not change — read the
-message — which is why the reading rule is stated per field rather than per pair. That is what makes
-this tool a usable self-check: you read what your users read, without waiting for one of them to
-tell you.
-
-### What the Proof layer does NOT gate
-
-All three showcase tools keep answering when your delegation is revoked — not just
-`proof_check_this_server`. That is deliberate for the one that reports the revocation, and the
-other two inherit it because they share the same un-gated registration. So a revoked server keeps
-offering a working third-party verification tool and a working invitation; only
-`proof_check_this_server` discloses that the server's own authorization is gone.
-
-If you render your own status surface, `currentVerdict` / `resolveOptions` give you the same
-verdict the gate enforces, and `refusalMessage(principal, reason)` / `REFUSAL_DETAILS_URL` give you
-the sentence your callers are receiving — so you do not have to write a second one that drifts from
-it.
+**While Proof is unreachable, the last answer stands.** A cached `valid` keeps running and a cached
+refusal keeps refusing, for as long as the outage lasts; after a failed attempt the server stops
+waiting on Proof for 30 seconds (in memory only). With no answer at all — a first start, or a lost
+cache — the tools run once the two attempts are spent, and `proof_holdings_status` reports
+`never_validated: true`; the server then stops waiting for one interval. Revocation is enforced only
+while Proof can be reached.
 
 ## What a refusal looks like
 
-A gated tool call, when the delegation is not currently valid, returns an MCP tool error result
-instead of running your handler. This gate is silent on success and speaks only when it refuses.
+A refused call returns one text block holding compact JSON:
 
-With `guardDelegation` alone, that refusal text is the first thing most readers ever see from
-Proof — it names Proof, names you, and gives one action. With `installProofLayer` it is not: the
-three showcase tools' own descriptions already name Proof and the same revocation risk before any
-call is ever refused.
-
-**When the issuer answered and the answer was no**, each reason has its OWN lead clause — the
-states are different facts and a reader who is told "revoked" about a pause acts on the wrong one.
-`revoked`:
-
-```
-example.com's authorization to run this was revoked, and Proof (proof.holdings) cannot confirm it
-as valid — retrying will not fix this. Details: proof.holdings/delegation. If this is unexpected,
-contact example.com.
+```json
+{"error":"revoked","message":"Refused by Proof: example.com's authorization was revoked. Retrying will not fix this. Details: proof.holdings/delegation","retryable":false}
 ```
 
-`suspended`, where the difference is the whole point — a pause is reversible and nothing published
-has to be removed:
+`error` is the reason (`revoked`, `suspended`, `expired`, `unknown_delegation`, `invalid`,
+`malformed`, `unsupported_version`, … — an answer this version does not know refuses as
+`unrecognized_refusal`). `retryable` is `true` only for `key_revoked`, below.
+
+## Key revocation
+
+Proof rotates the keys it signs delegations with. A planned rotation changes nothing for you: old
+signatures stay verifiable. When a signing key is **revoked** (for example after a suspected
+compromise), Proof re-signs every delegation that key signed under its current key — same
+delegation, same claims, a new signature — and `POST /proofs/validate` answers `key_revoked` for
+the token you configured. Without help, your server would then refuse every tool call while your
+delegation is still perfectly valid.
+
+So the gate picks the re-signed token up itself:
+
+1. Only a `key_revoked` answer starts this. `revoked`, `suspended`, `expired` and every other
+   answer refuse exactly as before.
+2. It refetches the issuer's JWKS, then pulls the current token by handle from the public
+   `GET /api/v1/proofs/delegation-token/:handle`.
+3. It accepts the pulled token only if it is a different token signed under a different key, names
+   the same handle (`sub`), delegate and `jti` as your token, was issued no earlier than your token
+   and no more than 5 seconds in the future, does not expire later than your token, and verifies
+   under a key that is not revoked against your token's issuer and principal. Anything else is a
+   failed pull.
+4. An accepted token replaces the configured one for this process and is written to `cacheDir`,
+   so the next process picks it up from disk — after re-checking its lineage, issuer and principal
+   against the configured token (its signature was verified when it was accepted) — instead of
+   pulling again. The old token's cached verdict is dropped and the new token is checked
+   with Proof in the same call.
+5. Pulls run inside tool calls (there is no background timer): the first on the call after the
+   `key_revoked` answer, then after 30 s, 2 min, 8 min and 10 min — five per episode, persisted
+   across restarts. If none is accepted, the gate keeps refusing.
+
+While it pulls, a call is refused with `key_revoked` (`retryable: true`):
 
 ```
-example.com's authorization to run this is paused, and Proof (proof.holdings) cannot confirm it as
-valid while the pause holds — retrying will not fix this. Details: proof.holdings/delegation. If
-this is unexpected, contact example.com.
+Refused by Proof: example.com's authorization is being re-signed under a new key. Retry in a few minutes. Details: proof.holdings/delegation
 ```
 
-`expired` says it ran out, `unknown_delegation` that there is no record of it, and `invalid` that
-Proof does not consider it valid; each keeps the same closing link and action.
-
-**When we could not ask at all** the wording is deliberately different, and the difference is the
-point — this is a connectivity failure where your server runs, not a decision anyone made about
-you, and telling the reader to contact you would send them to ask about something that did not
-happen. The two cases have their own lead clause, because one has a cached answer behind it and
-the other never had one:
-
-`grace_exhausted` — we had a good answer and could not renew it:
+Once the five pulls are spent, with `reissue_unavailable`:
 
 ```
-Proof (proof.holdings) has been unreachable for several consecutive checks, so example.com's
-authorization to run this can no longer be confirmed — a connectivity failure here, not a decision
-by example.com. Details: proof.holdings/delegation. Check outbound network access to
-proof.holdings from wherever this server runs.
+Refused by Proof: example.com's authorization was re-signed; this server could not fetch it. Ask its publisher. Details: proof.holdings/delegation
 ```
 
-`unresolved_at_startup` — a first run with nothing cached to extend:
+To recover from that state, configure the current token (from your dashboard, any SDK's
+`delegations` resource, or the public pull above) — a new configured token starts with a clean
+cache entry.
 
-```
-Proof (proof.holdings) could not be reached to confirm example.com's authorization to run this, so
-this call is refused rather than assumed — a connectivity failure here, not a decision by
-example.com. Details: proof.holdings/delegation. Check outbound network access to proof.holdings
-from wherever this server runs.
-```
+The key set the pickup verifies against is persisted in `cacheDir` as well (`jwks-*.json`),
+tombstones included: a revoked key stays revoked across restarts until `revoked_at + 365 days`.
+`clearTombstones({ cacheDir, baseUrl })` is the only way to drop one sooner.
 
-A reason this version has never seen is refused with the reason carried through (truncated past a
-bound, since it reaches an agent's context) and no claim about what happened — the issuer may add one, and an unrecognized verdict fails closed here
-the same way it does everywhere else in this package.
+Your published copy in `server.json` or `agent-card.json` still carries the old token: refresh it
+with `delegation-publisher refresh` (`@proof-holdings/delegation-publisher`). A DNS pointer
+(`_mcp.<domain>`) needs no change, because it names the card, not the token.
 
-The refusal never throws through your own HTTP client, is never retried internally, and is
-excluded from any retry policy your server otherwise applies to its own outbound calls — a
-refusal is not treated as a transient failure by anything in this package.
+## The cache
+
+One file per token and issuer in `cacheDir`, named by a SHA-256 of the token, written atomically
+(temporary file, then rename; mode 0600). If the directory cannot be written, verdicts are kept in
+memory for the life of the process and one line is written to stderr — never to stdout, which is
+the MCP stdio transport. Files written by 0.1.x and 0.2.x are not read.
 
 ## What this cannot protect against
 
@@ -256,22 +186,10 @@ authorization — a contract that ended, a key that was rotated, a domain that w
 re-verified — because the check lives in code the publisher installed and did not remove. It
 does **not** defend against a hostile operator who deletes the wiring: nothing running inside a
 process can force a different, adversarial version of that process to check anything.
-Verification that does not depend on the server's own cooperation is a separate concern, tracked
-under Proof Holdings' own MCP checker.
 
-The same bound covers what `proof_check_this_server` reports. Its answer is only as honest as the
-process giving it: an operator can, for example, edit the code, or — without editing anything —
-plant a cache file (`cacheDir`) holding a valid verdict for a token of their own making under the
-default issuer's file name, and the answer will name
-that token's claims with `principal_source: "token"`. Nothing inside the process can tell a planted
-verdict from a real one. Treat the self-check as the publisher's own instrument, and verify a server
-you do not run from outside it.
-
-Both public MCP SDK registration entry points — `server.tool()` and `server.registerTool()` — are
-gated identically. A publisher who later calls the SDK's own `registeredTool.update()` to redefine
-a tool's callback after registration bypasses the gate for that tool, the same way editing any
-other line of the publisher's own code would; this package cannot intercept a call it is not on
-the path of.
+The same bound covers `proof_holdings_status`. Its answer is only as honest as the process giving
+it, and the cache is not a trust boundary against the publisher: a planted cache file is read like
+a real one. Verify a server you do not run from outside it.
 
 ## Network egress
 
@@ -279,26 +197,19 @@ For a `url` artifact (you operate the server), the poll leaves **your** infrastr
 different from any other outbound call your service already makes.
 
 For a `purl` artifact (a package a consumer installs and runs themselves), the poll leaves the
-**consumer's** network — only while their tools are being called: about once per interval at the
-default, more often when calls arrive together after the cached answer has gone stale. Air-gapped and
-egress-filtered deployments are **permanently denied, not degraded**: the on-disk grace window
-only extends the *last good answer already obtained*, and a first run has none to extend — a
-brand-new install with no cached verdict and no reachable issuer refuses on its very first tool
-call. There is no offline mode.
+**consumer's** network, and only while their tools are being called: about once per interval while
+Proof answers, more often while it cannot be reached, plus at most one a minute per process
+through `proof_holdings_status`. On a network that cannot
+reach Proof the tools keep running on the last answer, or — with none — run unvalidated after the
+first attempts, as described above.
 
 ## What defeats this without touching our code
 
-Two things bypass this mechanism entirely, and neither requires touching the delegated server's
-code:
+- **Blocking the network to Proof.** A cached `valid` then stands for as long as Proof cannot be
+  reached.
+- **Stopping or slowing the system clock.** Cache age is measured against wall-clock time. Rolling
+  it backward does not help: an answer stamped later than now makes the next call ask again.
+- **Replaying a stale cache file.** Restoring an older copy restores whatever verdict it held.
 
-- **Stopping or slowing the system clock.** The grace window is measured against wall-clock time;
-  an operator or a compromised host that holds the clock still, or slows it, can extend it
-  indefinitely. Rolling it backward does not: a cached check stamped later than now is treated as
-  due for a poll.
-- **Replaying a stale cache file.** The on-disk cache is a plain JSON file. Restoring an older
-  copy (from a backup, a snapshot, a container image built before revocation) restores whatever
-  verdict was cached at that point.
-
-Neither of these requires cooperation from THIS package to defeat — they operate on the
-environment underneath it, which is exactly why the scope limit above matters: this is
-self-enforcement by a cooperative, unmodified process, not tamper-resistance.
+Neither requires cooperation from this package — they operate on the environment underneath it.
+This is self-enforcement by a cooperative, unmodified process, not tamper-resistance.
