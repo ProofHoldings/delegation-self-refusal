@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+### Changed
+
+- The status tool's `proof_holdings.about`, a `const` of its output schema, says what the status
+  covers: "Proof Holdings issued the delegation this server presents. The status above, from
+  proof.holdings, says whether that delegation is in force; it says nothing about the quality or
+  safety of the server." 0.3.0 said that Proof Holdings verifies a domain owner authorized the
+  server, which nothing checks. A consumer validating the status output against the 0.3.0 schema
+  rejects the new text.
+- A tool whose own answer fails its `outputSchema` (the SDK's `MCP error -32602: Output validation
+  error…`) is answered `internal_error` instead of `invalid_arguments`, with the SDK's text after
+  that prefix as the message, bounded and with the token redacted, so the agent is not told to
+  change arguments that were fine. Every other `-32602` text is still `invalid_arguments`.
+
 ## 0.3.0
 
 Implements `docs/mcp-delegation-gate-contract.md`, shared with the Python and Go gates.

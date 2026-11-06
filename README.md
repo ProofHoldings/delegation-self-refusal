@@ -75,8 +75,10 @@ The principal, delegate and expiry are read from the token; there is nothing els
 
 With a token, it also rewrites the SDK's input-validation errors for your own tools (`MCP error -32602: …`) into
 the same JSON envelope as a refusal, with `error: "invalid_arguments"`, the message cut at 200
-characters and any copy of your token replaced with `[redacted]`. Every other result of your tools
-passes through unchanged.
+characters and any copy of your token replaced with `[redacted]`. When the error is the SDK's
+`Output validation error` (your tool's own answer failing its `outputSchema`), the envelope says
+`error: "internal_error"` instead, so the agent is not told to change arguments that were fine.
+Every other result of your tools passes through unchanged.
 
 ## When it asks Proof
 

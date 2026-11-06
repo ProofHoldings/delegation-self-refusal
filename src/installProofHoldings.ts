@@ -6,7 +6,7 @@ import { effectiveInterval } from './core.js';
 import { GateEngine } from './engine.js';
 import { pullReissuedDelegation } from './pickup.js';
 import { pollValidate } from './poll.js';
-import { boundText, envelopeResult, redact, refusalEnvelope } from './refusal.js';
+import { boundText, type Envelope, envelopeResult, redact, refusalEnvelope } from './refusal.js';
 import { statusOutputSchema } from './status.js';
 import { principalOf } from './token.js';
 import { rewriteValidationError } from './validationRewrite.js';
@@ -44,11 +44,28 @@ function redactAll(text: string, tokens: Array<string | null>): string {
   return tokens.reduce<string>((value, token) => redact(value, token ?? undefined), text);
 }
 
+const VALIDATION_PREFIX = /^MCP error -32602: ?/;
+const OUTPUT_VALIDATION_PREFIX = /^MCP error -32602: ?Output validation error/;
+
+export function gateTextEnvelope(text: string): Envelope | null {
+  if (OUTPUT_VALIDATION_PREFIX.test(text)) {
+    return {
+      error: 'internal_error',
+      message: boundText(text.replace(VALIDATION_PREFIX, ''), GATE_CONSTANTS.message_max_chars),
+      retryable: false,
+    };
+  }
+  const input = { isError: true, content: [{ type: 'text', text }] };
+  const rewritten = rewriteValidationError(input);
+  return rewritten === input ? null : (JSON.parse(rewritten.content[0].text) as Envelope);
+}
+
 /** The -32602 rewrite, applied to a copy whose text no longer carries the token (contract § 8). */
 function rewriteRedacted(result: unknown, tokens: Array<string | null>): unknown {
   if (rewriteValidationError(result) === result) return result;
   const r = result as { content: Array<{ type: 'text'; text: string }> };
-  return rewriteValidationError({ ...r, content: [{ ...r.content[0], text: redactAll(r.content[0].text, tokens) }] });
+  const envelope = gateTextEnvelope(redactAll(r.content[0].text, tokens));
+  return envelope ? { ...r, content: [{ type: 'text', text: JSON.stringify(envelope) }], isError: true } : result;
 }
 
 /**

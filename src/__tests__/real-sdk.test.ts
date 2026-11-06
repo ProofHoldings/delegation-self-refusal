@@ -176,6 +176,60 @@ describe('the gate sits in tools/call, before SDK input validation', () => {
     expect(envelope.message).toContain('[redacted]');
   });
 
+  it('answers a tool whose own structured output fails its outputSchema with internal_error, not invalid_arguments', async () => {
+    const registerReport = (target: McpServer) =>
+      target.registerTool('get_report', { description: 'report', outputSchema: { total: z.number() } }, async () => {
+        handlerCalls += 1;
+        return { structuredContent: { total: 'x' }, content: [{ type: 'text', text: '{"total":"x"}' }] };
+      });
+    const ungated = newServer();
+    registerReport(ungated);
+    const raw = (await (await connect(ungated)).callTool({ name: 'get_report', arguments: {} })) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    expect(raw.isError).toBe(true);
+    expect(raw.content[0].text).toMatch(/^MCP error -32602: Output validation error: Invalid structured content for tool get_report/);
+
+    const server = newServer();
+    registerReport(server);
+    installProofHoldings(server as unknown as McpServerLike, { token: TOKEN, cacheDir: dir });
+    const client = await connect(server);
+
+    const envelope = envelopeOf(await client.callTool({ name: 'get_report', arguments: {} }));
+    expect(handlerCalls).toBe(2);
+    expect(envelope.error).toBe('internal_error');
+    expect(envelope.retryable).toBe(false);
+    expect(envelope.message).toMatch(/^Output validation error: Invalid structured content for tool get_report/);
+    expect([...envelope.message].length).toBeLessThanOrEqual(GATE_CONSTANTS.message_max_chars);
+  });
+
+  it('redacts the token a tool repeats in its own schema-invalid output (zod 3 enum)', async () => {
+    const registerMode = (target: McpServer) =>
+      target.registerTool('get_mode', { description: 'mode', outputSchema: { mode: z.enum(['fast', 'slow']) } }, async () => ({
+        structuredContent: { mode: TOKEN },
+        content: [{ type: 'text', text: 'mode' }],
+      }));
+    const ungated = newServer();
+    registerMode(ungated);
+    const raw = (await (await connect(ungated)).callTool({ name: 'get_mode', arguments: {} })) as {
+      content: Array<{ text: string }>;
+    };
+    expect(raw.content[0].text).toMatch(/^MCP error -32602: Output validation error/);
+    expect(raw.content[0].text).toContain(TOKEN);
+
+    const server = newServer();
+    registerMode(server);
+    installProofHoldings(server as unknown as McpServerLike, { token: TOKEN, cacheDir: dir });
+    const client = await connect(server);
+
+    const envelope = envelopeOf(await client.callTool({ name: 'get_mode', arguments: {} }));
+    expect(envelope.error).toBe('internal_error');
+    expect(envelope.message).not.toContain(TOKEN);
+    expect(envelope.message).not.toContain(TOKEN.slice(0, 40));
+    expect(envelope.message).toContain('[redacted]');
+  });
+
   it('passes the status tool through under a revoked token', async () => {
     answer({ valid: false, reason: 'revoked' });
     const server = newServer();

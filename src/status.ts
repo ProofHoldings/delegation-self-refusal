@@ -8,7 +8,7 @@ import type { StatusClaims } from './token.js';
 
 export const PROOF_HOLDINGS_ABOUT = {
   about:
-    "Proof Holdings verifies that a domain owner authorized this server. The status above comes from proof.holdings, the issuer of this server's delegation.",
+    "Proof Holdings issued the delegation this server presents. The status above, from proof.holdings, says whether that delegation is in force; it says nothing about the quality or safety of the server.",
   url: 'https://proof.holdings',
   llms_txt: 'https://proof.holdings/llms.txt',
 } as const;

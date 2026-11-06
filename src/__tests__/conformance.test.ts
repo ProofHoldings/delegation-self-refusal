@@ -11,12 +11,11 @@ import { GATE_CONSTANTS } from '../constants.js';
 import { classifyPollAnswer, BACKEND_DEFINITIVE_REASONS, KEY_ROTATION_REASONS, LOCAL_DEFINITIVE_REASONS, LOCAL_TRANSPORT_REASONS, refusalCodeOf, UNRECOGNIZED_REFUSAL, UNRESOLVED_BACKEND_REASONS } from '../reasons.js';
 import { emptyRecords, type Mem, type PullOutcome, type TokenRecords } from '../core.js';
 import { GateEngine, type GateDecision } from '../engine.js';
-import { installProofHoldings, type McpServerLike } from '../installProofHoldings.js';
+import { gateTextEnvelope, installProofHoldings, type McpServerLike } from '../installProofHoldings.js';
 import { checkPulledToken } from '../pickup.js';
 import type { PollResult } from '../reasons.js';
 import { REFUSAL_TEXTS, refusalEnvelope } from '../refusal.js';
 import { statusOutput, statusOutputSchema } from '../status.js';
-import { rewriteValidationError } from '../validationRewrite.js';
 
 /**
  * The TypeScript gate's runner for the shared fixtures in `sdks/shared/fixtures/mcp_delegation_gate`
@@ -201,7 +200,11 @@ const MCP_SRC_ONLY_ENVELOPE_CASES = [
   'text_message_bounded',
   'text_token_redacted',
 ];
-const GATE_TEXT_CASES = ['text_sdk_validation_error_rewritten'];
+const GATE_TEXT_CASES = [
+  'text_sdk_validation_error_rewritten',
+  'text_sdk_output_validation_error',
+  'text_sdk_output_validation_error_bounded',
+];
 
 describe('envelope_cases.json', () => {
   const cases: Json[] = fixture('envelope_cases.json').cases;
@@ -217,8 +220,7 @@ describe('envelope_cases.json', () => {
   });
 
   it.each(cases.filter((c) => GATE_TEXT_CASES.includes(c.id)).map((c) => [c.id, c]))('%s', (_id, testCase) => {
-    const result = rewriteValidationError({ isError: true, content: [{ type: 'text', text: testCase.text }] });
-    expect(JSON.parse(result.content[0].text)).toEqual(testCase.expect);
+    expect(gateTextEnvelope(testCase.text)).toEqual(testCase.expect);
   });
 });
 
