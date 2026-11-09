@@ -1,14 +1,14 @@
 import { refreshJwks, verifyDelegation } from '@proof-holdings/delegation-verifier';
 
 import { GATE_CONSTANTS, MAX_PULL_BODY_BYTES } from './constants.js';
-import type { PullOutcome } from './core.js';
+import type { PullMode, PullOutcome } from './core.js';
 import { createDiskKeySetStore, jwksUriFor } from './keyset-store.js';
 import { boundedFetch, joinUrl, surfaceHeaders, type FetchLike } from './poll.js';
 import { decodeToken } from './token.js';
 
 /**
  * Picking up a re-signed delegation after the issuer answered `key_revoked`
- * (`docs/mcp-delegation-gate-contract.md` § 6). A pull is an anonymous read, so what comes back is
+ * (`docs/mcp-delegation-gate-contract.md` § 6), or a renewed one before the token runs out (§ 6a). A pull is an anonymous read, so what comes back is
  * a claim to check, never an instruction.
  */
 
@@ -26,7 +26,8 @@ export type PullRejection =
   | 'lineage_delegate'
   | 'iat_before_old'
   | 'iat_in_future'
-  | 'exp_widened';
+  | 'exp_widened'
+  | 'exp_not_widened';
 
 export interface LineageView {
   kid: string | null | undefined;
@@ -72,13 +73,21 @@ export function lineageViewOf(token: string): LineageView | null {
   return decoded ? { kid: decoded.kid, token, claims: decoded.claims } : null;
 }
 
-/** Every acceptance check but the signature, in the contract's order; the first failing one names the rejection. */
-export function checkPulledToken(old: LineageView, pulled: LineageView, nowMs: number): 'accepted' | PullRejection {
+/**
+ * Every acceptance check but the signature, in the contract's order; the first failing one names the
+ * rejection. A renewal (§ 6a) may keep the `kid` and must widen `exp`; a rotation (§ 6) may do neither.
+ */
+export function checkPulledToken(
+  old: LineageView,
+  pulled: LineageView,
+  nowMs: number,
+  mode: PullMode = 'rotation',
+): 'accepted' | PullRejection {
   const before = lineageClaims(old.claims);
   if (!before) return 'old_token_unreadable';
   if (pulled.token === old.token) return 'same_token';
   if (typeof pulled.kid !== 'string' || pulled.kid.length === 0) return 'malformed_response';
-  if (pulled.kid === old.kid) return 'same_kid';
+  if (mode === 'rotation' && pulled.kid === old.kid) return 'same_kid';
   const after = lineageClaims(pulled.claims);
   if (!after) return 'malformed_response';
   if (after.sub !== before.sub) return 'lineage_sub';
@@ -86,19 +95,22 @@ export function checkPulledToken(old: LineageView, pulled: LineageView, nowMs: n
   if (after.delegate !== before.delegate) return 'lineage_delegate';
   if (after.iat < before.iat) return 'iat_before_old';
   if (after.iat > Math.floor(nowMs / 1000) + GATE_CONSTANTS.lineage_clock_tolerance_ms / 1000) return 'iat_in_future';
-  if (after.exp > before.exp) return 'exp_widened';
+  if (mode === 'rotation' && after.exp > before.exp) return 'exp_widened';
+  if (mode === 'renewal' && after.exp <= before.exp) return 'exp_not_widened';
   return 'accepted';
 }
 
 /**
- * The restart re-check (§ 6 Restart): a persisted replacement is used only if it passes every check
- * but the signature against the configured token and names the same `iss` and `principal`; the
- * signature was verified when it was accepted.
+ * The restart re-check (§ 6 Restart, § 6a Restart): a persisted replacement is used only if it passes
+ * every check but the signature of either pickup against the configured token and names the same
+ * `iss` and `principal`; the signature was verified when it was accepted.
  */
 export function replacementAcceptable(configuredToken: string, replacement: string, nowMs: number): boolean {
   const old = lineageViewOf(configuredToken);
   const pulled = lineageViewOf(replacement);
-  if (!old || !pulled || checkPulledToken(old, pulled, nowMs) !== 'accepted') return false;
+  if (!old || !pulled) return false;
+  const passes = (['rotation', 'renewal'] as const).some((mode) => checkPulledToken(old, pulled, nowMs, mode) === 'accepted');
+  if (!passes) return false;
   return pulled.claims.iss === old.claims.iss && pulled.claims.principal === old.claims.principal;
 }
 
@@ -107,11 +119,24 @@ export interface PullParams {
   baseUrl: string;
   cacheDir: string;
   timeoutMs: number;
+  /** Which acceptance rule applies (§ 6 or § 6a). Required: a dropped mode would judge a renewal by the rotation rules. */
+  mode: PullMode;
   fetch?: FetchLike;
   nowMs?: () => number;
 }
 
 export type PullResult = PullOutcome & { detail?: string };
+
+/**
+ * A pulled token the signature step could not judge because it could not READ a key set
+ * (`jwks_unavailable`, `jwks_stale`) is a failed refetch — reached nobody, not an answer — so a
+ * renewal retries after `backoff_cached_ms` rather than the hour (contract § 6a). Every other
+ * verifier reason is an answer: `verification_failed`.
+ */
+export function rejectionForVerification(reason: string): PullResult {
+  const unread = reason === 'jwks_unavailable' || reason === 'jwks_stale';
+  return { kind: 'rejected', reason: unread ? 'jwks_refetch_failed' : 'verification_failed', detail: reason };
+}
 
 function markedFetch(fetchImpl: FetchLike): FetchLike {
   return (input, init = {}) => {
@@ -168,7 +193,7 @@ export async function pullReissuedDelegation(params: PullParams): Promise<PullRe
     if (!pulled.ok) return { kind: 'rejected', reason: pulled.reason };
 
     const candidate = lineageViewOf(pulled.token) ?? { kid: undefined, token: pulled.token, claims: {} };
-    const checked = checkPulledToken(old, candidate, now());
+    const checked = checkPulledToken(old, candidate, now(), params.mode);
     if (checked !== 'accepted') return { kind: 'rejected', reason: checked };
 
     const verified = await verifyDelegation(pulled.token, {
@@ -181,7 +206,7 @@ export async function pullReissuedDelegation(params: PullParams): Promise<PullRe
       keySetStore,
       now: new Date(now()),
     });
-    if (!verified.valid) return { kind: 'rejected', reason: 'verification_failed', detail: verified.reason };
+    if (!verified.valid) return rejectionForVerification(verified.reason);
     return { kind: 'accepted', token: pulled.token };
   } catch {
     return { kind: 'rejected', reason: 'pull_unavailable' };

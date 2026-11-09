@@ -84,7 +84,7 @@ function engineFor(token: string | null, baseUrl: string, cacheDir: string, poll
       pollIntervalMs,
       store: createDiskStore({ dir: cacheDir, baseUrl }),
       poll: (pollToken, trigger, timeoutMs) => pollValidate(pollToken, { baseUrl, timeoutMs, trigger }),
-      pull: (previousToken, timeoutMs) => pullReissuedDelegation({ previousToken, baseUrl, cacheDir, timeoutMs }),
+      pull: (previousToken, timeoutMs, mode) => pullReissuedDelegation({ previousToken, baseUrl, cacheDir, timeoutMs, mode }),
     });
     engines.set(key, engine);
   }

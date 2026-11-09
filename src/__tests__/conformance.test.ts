@@ -119,7 +119,9 @@ describe('cache_keys.json', () => {
 describe('pickup_lineage.json', () => {
   const file = fixture('pickup_lineage.json');
   it.each((file.cases as Json[]).map((c) => [c.id, c]))('%s', (_id, testCase) => {
-    expect(checkPulledToken(testCase.old ?? file.old, testCase.pulled, testCase.now ?? file.now)).toBe(testCase.expect);
+    expect(checkPulledToken(testCase.old ?? file.old, testCase.pulled, testCase.now ?? file.now, testCase.mode ?? 'rotation')).toBe(
+      testCase.expect,
+    );
   });
 });
 
@@ -318,8 +320,8 @@ async function replay(testCase: Json) {
         result.kind === 'unresolved' && result.reason === 'timeout' ? timeoutMs : Math.min(response.latency_ms ?? 0, timeoutMs);
       return after(latency, result);
     },
-    pull: (token, timeoutMs) => {
-      requests.push({ at: Date.now(), kind: 'pull', trigger: 'gate', token: nameOf(token) });
+    pull: (token, timeoutMs, mode) => {
+      requests.push({ at: Date.now(), kind: 'pull', trigger: mode === 'renewal' ? 'renewal' : 'gate', token: nameOf(token) });
       const response = next();
       if (!('pull' in response)) throw new Error(`case ${testCase.id}: a pull consumed a poll response`);
       const outcome: PullOutcome =

@@ -1,7 +1,7 @@
 import type { GateConstants } from './constants.js';
 import type { PollResult } from './reasons.js';
 
-/** The pure core of `docs/mcp-delegation-gate-contract.md` §§ 2, 3 and 6: no I/O and no clock. */
+/** The pure core of `docs/mcp-delegation-gate-contract.md` §§ 2, 3, 6 and 6a: no I/O and no clock. */
 
 export type Verdict = { kind: 'valid' } | { kind: 'refused'; code: string };
 
@@ -28,6 +28,8 @@ export interface TokenRecords {
 export interface Mem {
   backoff_until: number | null;
   status_polled_at: number | null;
+  /** § 6a: no renewal pull before this epoch millisecond. */
+  renewal_next_at: number | null;
 }
 
 export type DecideOutcome =
@@ -39,7 +41,11 @@ export type DecideOutcome =
   | 'await'
   | 'await_cold'
   | 'await_pull'
+  | 'await_renewal'
   | 'run_unvalidated';
+
+/** Which pickup a pull serves: § 6 (a re-signed token after `key_revoked`) or § 6a (a renewed one). */
+export type PullMode = 'rotation' | 'renewal';
 
 export type PullOutcome = { kind: 'accepted'; token: string } | { kind: 'rejected'; reason: string };
 
@@ -52,6 +58,13 @@ export function emptyRecords(): TokenRecords {
 export function localExpiry(exp: unknown, now: number, c: GateConstants): LocalExpiry {
   if (typeof exp !== 'number' || !Number.isFinite(exp)) return 'malformed';
   return now > exp * 1000 + c.exp_leeway_ms ? 'expired' : 'ok';
+}
+
+/** § 6a: inside `exp − expires_soon_ms`, with no rejected renewal pull in the last gap. */
+export function renewalDue(exp: unknown, now: number, mem: Mem, c: GateConstants): boolean {
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) return false;
+  if (now < exp * 1000 - c.expires_soon_ms) return false;
+  return mem.renewal_next_at === null || now >= mem.renewal_next_at;
 }
 
 export function effectiveInterval(configured: number | undefined, c: GateConstants): number {
@@ -76,7 +89,7 @@ export function decide(
 ): DecideOutcome {
   const local = localExpiry(exp, now, c);
   if (local === 'malformed') return 'refuse(local_malformed)';
-  if (local === 'expired') return 'refuse(local_expired)';
+  if (local === 'expired') return renewalDue(exp, now, mem, c) ? 'await_renewal' : 'refuse(local_expired)';
 
   if (gate?.key_rotation) return pullDue(gate.key_rotation, now, c) ? 'await_pull' : 'refuse(cached_refused)';
 

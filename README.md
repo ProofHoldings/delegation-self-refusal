@@ -174,6 +174,30 @@ Your published copy in `server.json` or `agent-card.json` still carries the old 
 with `delegation-publisher refresh` (`@proof-holdings/delegation-publisher`). A DNS pointer
 (`_mcp.<domain>`) needs no change, because it names the card, not the token.
 
+## Renewal
+
+When a delegation is renewed in place, Proof signs a new token for the same handle with a later
+expiry, keeping the handle (`sub`), `jti`, principal and delegate. The token you configured stays
+valid until its own `exp`, and from 0.5.0 the gate fetches the renewed one itself:
+
+1. In the 14 days before your token expires, a tool call served on a fresh `valid` answer is served
+   at once and also starts one background pull from
+   `GET /api/v1/proofs/delegation-token/:handle`. At most one runs at a time.
+2. Until you renew, the pull answers the same token; the next pull is made an hour later at the
+   earliest. A pull that cannot reach Proof is retried after 30 seconds instead.
+3. The gate accepts a pulled token only if it names the same handle, `jti` and delegate, was issued
+   no earlier than your token, expires later than it, and verifies against the issuer's keys. An
+   accepted token replaces the configured one and is written to `cacheDir`, like a re-signed one
+   (above).
+4. A call made after your token has expired waits for one pull before refusing `expired`, so a
+   server that was idle through the whole window still picks the renewal up.
+
+Nothing is redeployed. What does not change is every place you PUBLISHED the old token (agent
+card, MCP server card, `server.json`): put the new token there before the old one expires.
+
+A gate older than 0.5.0 keeps the token it was deployed with, which verifies until its own `exp`,
+and then refuses every tool call. Upgrade before renewing.
+
 ## The cache
 
 One file per token and issuer in `cacheDir`, named by a SHA-256 of the token, written atomically

@@ -1,4 +1,4 @@
-export const GATE_VERSION = '0.4.0';
+export const GATE_VERSION = '0.5.0';
 
 export const STATUS_TOOL_NAME = 'proof_holdings_status';
 
@@ -29,6 +29,7 @@ export const GATE_CONSTANTS = {
   pull_gap_factor: 4,
   pull_max_gap_ms: 600_000,
   lineage_clock_tolerance_ms: 5_000,
+  renewal_pull_gap_ms: 3_600_000,
   message_max_chars: 200,
   principal_max_chars: 64,
 } as const;

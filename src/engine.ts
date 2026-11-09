@@ -7,8 +7,10 @@ import {
   emptyRecords,
   localExpiry,
   pullGapMs,
+  renewalDue,
   type DecideOutcome,
   type Mem,
+  type PullMode,
   type PullOutcome,
   type TokenRecords,
 } from './core.js';
@@ -19,14 +21,17 @@ import type { PollResult } from './reasons.js';
 import { statusOutput, type StatusOutput } from './status.js';
 import { statusClaims, tokenExp } from './token.js';
 
+/** Pull outcomes that are not an answer from the issuer: the pull, or its JWKS refetch, reached nobody. */
+const UNREACHABLE_PULL_REASONS: ReadonlySet<string> = new Set(['pull_unavailable', 'jwks_refetch_failed']);
+
 /**
- * The shell around the pure core (`docs/mcp-delegation-gate-contract.md` §§ 2, 3, 6, 10): it runs
+ * The shell around the pure core (`docs/mcp-delegation-gate-contract.md` §§ 2, 3, 6, 6a, 10): it runs
  * the poll or pull an outcome asks for, applies the answer to the records as they are when it
  * arrives, persists them and keeps the per-process memory.
  */
 
 export type PollFn = (token: string, trigger: PollTrigger, timeoutMs: number) => Promise<PollResult>;
-export type PullFn = (token: string, timeoutMs: number) => Promise<PullOutcome & { detail?: string }>;
+export type PullFn = (token: string, timeoutMs: number, mode: PullMode) => Promise<PullOutcome & { detail?: string }>;
 
 export interface EngineDeps {
   token: string | null;
@@ -56,7 +61,7 @@ export interface StatusAnswer {
 type Settled = TokenRecords & { local?: string };
 
 interface Operation {
-  kind: 'await' | 'pull' | 'refresh';
+  kind: 'await' | 'pull' | 'refresh' | 'renewal';
   token: string;
   promise: Promise<Settled>;
   decided: boolean;
@@ -73,7 +78,7 @@ function delay(ms: number): Promise<void> {
 }
 
 export class GateEngine {
-  readonly mem: Mem = { backoff_until: null, status_polled_at: null };
+  readonly mem: Mem = { backoff_until: null, status_polled_at: null, renewal_next_at: null };
   private readonly configured: string | null;
   private active: string | null;
   private replacementChecked = false;
@@ -83,6 +88,8 @@ export class GateEngine {
   private readonly warn: (line: string) => void;
   private awaited: Operation | null = null;
   private refresh: Operation | null = null;
+  /** The renewal pull in flight (§ 6a), background or awaited; at most one per engine. */
+  private renewing: Operation | null = null;
   private readonly inFlight = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: EngineDeps) {
@@ -114,8 +121,15 @@ export class GateEngine {
     if (token === null) return { outcome: 'serve', result: 'run', token: null };
 
     const shared = this.awaited;
-    if (shared && (shared.token === token || shared.kind === 'pull')) {
-      const outcome: GateOutcome = shared.kind === 'pull' ? 'await_pull' : this.read(token).gate ? 'await' : 'await_cold';
+    if (shared && (shared.token === token || shared.kind === 'pull' || shared.kind === 'renewal')) {
+      const outcome: GateOutcome =
+        shared.kind === 'pull'
+          ? 'await_pull'
+          : shared.kind === 'renewal'
+            ? 'await_renewal'
+            : this.read(token).gate
+              ? 'await'
+              : 'await_cold';
       const settled = await shared.promise;
       if (settled.local) return { outcome, result: 'refuse', code: settled.local, token: this.active };
       return { outcome, ...verdictOf(settled), token: this.active };
@@ -130,7 +144,11 @@ export class GateEngine {
       case 'refuse(local_malformed)':
         return { outcome, result: 'refuse', code: 'malformed', token };
       case 'refuse(cached_refused)':
+        return { outcome, ...verdictOf(records), token };
       case 'serve':
+        if (records.gate?.verdict.kind === 'valid' && !this.renewing && !this.awaited && renewalDue(tokenExp(token), now, this.mem, this.c)) {
+          this.startBackgroundRenewal(token);
+        }
         return { outcome, ...verdictOf(records), token };
       case 'run_unvalidated':
         return { outcome, result: 'run', neverValidated: true, token };
@@ -141,6 +159,16 @@ export class GateEngine {
         return { outcome, ...verdictOf(await this.startAwaited('await', token, (op) => this.runAwait(token, op))), token };
       case 'await_cold':
         return { outcome, ...verdictOf(await this.startAwaited('await', token, (op) => this.runCold(token, op))), token };
+      case 'await_renewal': {
+        const settled = this.renewing
+          ? await this.renewing.promise
+          : await this.startAwaited('renewal', token, (op) => this.runRenewal(token, op, true));
+        if (settled.local) return { outcome, result: 'refuse', code: settled.local, token: this.active };
+        // A BACKGROUND pull shared here carries no `expired` of its own: with no swap, this token
+        // is still past its exp, and its cached verdict must not run the call (§ 6a).
+        if (this.active === token) return { outcome, result: 'refuse', code: 'expired', token };
+        return { outcome, ...verdictOf(settled), token: this.active };
+      }
       case 'await_pull': {
         const settled = await this.startAwaited('pull', token, (op) => this.runPull(token, op));
         if (settled.local) return { outcome, result: 'refuse', code: settled.local, token: this.active };
@@ -161,7 +189,7 @@ export class GateEngine {
     this.mem.status_polled_at = now;
 
     const shared = [this.awaited, this.refresh].find(
-      (op): op is Operation => op !== null && op.kind !== 'pull' && op.token === token,
+      (op): op is Operation => op !== null && op.kind !== 'pull' && op.kind !== 'renewal' && op.token === token,
     );
     if (shared) {
       const records = await shared.promise;
@@ -275,7 +303,7 @@ export class GateEngine {
     );
   }
 
-  private async pullOnce(token: string): Promise<PullOutcome & { detail?: string }> {
+  private async pullOnce(token: string, mode: PullMode): Promise<PullOutcome & { detail?: string }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<PullOutcome>((resolve) => {
       timer = setTimeout(
@@ -283,11 +311,17 @@ export class GateEngine {
         this.c.blocking_attempt_timeout_ms,
       );
     });
+    // A pull that throws synchronously, before any promise exists, is unreachable like one that
+    // rejects — as a raise is in the Python port and a panic in the Go one.
+    let pulled: Promise<PullOutcome>;
+    try {
+      pulled = this.deps.pull(token, this.c.blocking_attempt_timeout_ms, mode);
+    } catch {
+      pulled = Promise.resolve({ kind: 'rejected', reason: 'pull_unavailable' });
+    }
     try {
       return await Promise.race([
-        this.deps.pull(token, this.c.blocking_attempt_timeout_ms).catch(
-          (): PullOutcome => ({ kind: 'rejected', reason: 'pull_unavailable' }),
-        ),
+        pulled.catch((): PullOutcome => ({ kind: 'rejected', reason: 'pull_unavailable' })),
         timeout,
       ]);
     } finally {
@@ -296,7 +330,7 @@ export class GateEngine {
   }
 
   private async runPull(token: string, op: Operation): Promise<Settled> {
-    const outcome = await this.pullOnce(token);
+    const outcome = await this.pullOnce(token, 'rotation');
     const at = this.now();
     const current = this.read(token);
     if (!current.gate?.key_rotation) return current;
@@ -312,6 +346,45 @@ export class GateEngine {
       return applied.records;
     }
     return this.swap(token, applied.token, at, op);
+  }
+
+  /** A background renewal pull (§ 6a): the call that started it was served; never raises. */
+  private startBackgroundRenewal(token: string): void {
+    const op = { kind: 'renewal', token, decided: false } as Operation;
+    this.renewing = op;
+    op.promise = this.track(
+      this.runRenewal(token, op, false).catch(() => this.read(token)),
+    );
+  }
+
+  /**
+   * One renewal pull (§ 6a). Rejected: no other for `renewal_pull_gap_ms`, and an awaited one (past
+   * `exp`) refuses `expired`. Accepted: the § 6 swap.
+   */
+  private async runRenewal(token: string, op: Operation, awaited: boolean): Promise<Settled> {
+    this.renewing = op;
+    try {
+      const outcome = await this.pullOnce(token, 'renewal');
+      const at = this.now();
+      if (token !== this.active) return this.read(token);
+      if (outcome.kind === 'rejected') {
+        // Only an ANSWER earns the gap (§ 6a): a pull that reached nobody retries after the
+        // ordinary backoff. Past exp the call is refused either way — never served on an expired
+        // token, or expiry would be unenforceable by cutting the network.
+        const unreachable = UNREACHABLE_PULL_REASONS.has(outcome.reason);
+        this.mem.renewal_next_at = at + (unreachable ? this.c.backoff_cached_ms : this.c.renewal_pull_gap_ms);
+        if (outcome.reason !== 'same_token') {
+          const detail = outcome.detail ? ` (${outcome.detail})` : '';
+          this.warn(`delegation-self-refusal: renewed delegation not accepted: ${outcome.reason}${detail}`);
+        }
+        const records = this.read(token);
+        return awaited ? { ...records, local: 'expired' } : records;
+      }
+      this.mem.renewal_next_at = null;
+      return await this.swap(token, outcome.token, at, op);
+    } finally {
+      if (this.renewing === op) this.renewing = null;
+    }
   }
 
   private async swap(previous: string, token: string, at: number, op: Operation): Promise<Settled> {

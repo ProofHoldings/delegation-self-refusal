@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- Renewal pickup (`docs/mcp-delegation-gate-contract.md` § 6a). From 14 days before the token's
+  `exp`, a tool call served on a fresh `valid` verdict also starts one background pull of the
+  delegation's current token from `GET /api/v1/proofs/delegation-token/{handle}`. A renewed token —
+  same handle, `jti`, principal and delegate, a later `exp`, signed by the issuer — replaces the
+  configured one with no redeploy. A token past its `exp` makes one blocking pull before refusing
+  `expired`. Until the owner renews, the pull answers the same token, and the next is made an hour
+  later at the earliest.
+- A persisted replacement is used after a restart when it passes the key-rotation checks or the
+  renewal checks.
+- A renewal pull that reached nobody (a timeout, a network error, a non-2xx answer, or a key set
+  that could not be fetched or read) is retried after 30 seconds (`backoff_cached_ms`); only an answer from Proof waits
+  the hour. Past the token's `exp` every call is still refused `expired` until a pull succeeds.
+
+### Upgrade before renewing
+
+- A gate older than 0.5.0 keeps presenting the token it was deployed with, which verifies until its
+  own `exp`. But if a signing key is revoked after the delegation was renewed, that gate's
+  key-rotation pickup refuses the re-signed token (its `exp` is later than the old one's) and every
+  tool call is refused `reissue_unavailable` until the server is redeployed. Upgrade the gate before
+  renewing.
+
 ## 0.4.0
 
 ### Changed

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { jwksUriFor } from '../keyset-store.js';
 import { GATE_CONSTANTS, SURFACE_HEADER, SURFACE_VALUE } from '../constants.js';
-import { pullReissuedDelegation, replacementAcceptable } from '../pickup.js';
+import { pullReissuedDelegation, rejectionForVerification, replacementAcceptable } from '../pickup.js';
 import { refreshJwks, resetJwksCache, setJwksClockForTests } from '../../../delegation-verifier/src/jwks.js';
 import {
   delegationClaims,
@@ -64,6 +64,7 @@ async function pull(net: ReturnType<typeof mockFetch>, previousToken = oldToken)
     baseUrl: BASE_URL,
     cacheDir: dir,
     timeoutMs: GATE_CONSTANTS.blocking_attempt_timeout_ms,
+    mode: 'rotation',
     fetch: net.fetch as unknown as typeof fetch,
     nowMs: () => nowSeconds * 1000,
   });
@@ -213,6 +214,47 @@ describe('pullReissuedDelegation — one rejection per acceptance condition (SC-
   });
 });
 
+describe('pullReissuedDelegation — renewal mode (contract § 6a)', () => {
+  // A renewal is signed under the family's CURRENT key, usually the one that signed the old token:
+  // no tombstone, and the same kid is allowed.
+  const liveJwks = (...live: TestKey[]) => ({ json: { keys: live.map(registryJwk), proof_tombstones: [] } });
+  const renew = (net: ReturnType<typeof mockFetch>) =>
+    pullReissuedDelegation({
+      previousToken: oldToken,
+      baseUrl: BASE_URL,
+      cacheDir: dir,
+      timeoutMs: GATE_CONSTANTS.blocking_attempt_timeout_ms,
+      mode: 'renewal',
+      fetch: net.fetch as unknown as typeof fetch,
+      nowMs: () => nowSeconds * 1000,
+    });
+
+  it('accepts a renewed token under the same kid with a later exp', async () => {
+    const renewed = await resign({ exp: nowSeconds + 300 * DAY }, oldKey);
+    expect(await renew(routes(renewed, liveJwks(oldKey)))).toEqual({ kind: 'accepted', token: renewed });
+  });
+
+  it('accepts a renewed token under a new kid', async () => {
+    const renewed = await resign({ exp: nowSeconds + 300 * DAY });
+    expect(await renew(routes(renewed, liveJwks(oldKey, newKey)))).toEqual({ kind: 'accepted', token: renewed });
+  });
+
+  it('answers same_token until the owner renews', async () => {
+    expect(await renew(routes(oldToken, liveJwks(oldKey)))).toEqual({ kind: 'rejected', reason: 'same_token' });
+  });
+
+  it('rejects an exp that is not later than the old one', async () => {
+    const same = await resign({ exp: nowSeconds + 3600 }, oldKey);
+    expect(await renew(routes(same, liveJwks(oldKey)))).toEqual({ kind: 'rejected', reason: 'exp_not_widened' });
+  });
+
+  it('still verifies the signature', async () => {
+    const stranger = await generateKey('dlg-stranger');
+    const forged = await resign({ exp: nowSeconds + 300 * DAY }, stranger);
+    expect(await renew(routes(forged, liveJwks(oldKey)))).toMatchObject({ kind: 'rejected', reason: 'verification_failed' });
+  });
+});
+
 describe('pullReissuedDelegation — what the pull itself can answer', () => {
   it('maps the uniform 404 to pull_not_found', async () => {
     expect(await pull(routes({ status: 404 }))).toEqual({ kind: 'rejected', reason: 'pull_not_found' });
@@ -264,10 +306,16 @@ describe('replacementAcceptable — the restart re-check (contract § 6 Restart)
     ['garbage', async () => 'garbage'],
     ['the configured token itself', async () => oldToken],
     ['another handle', async () => resign({ sub: 'ph_dlg_00000000000000000000000000000009' })],
-    ['a widened exp', async () => resign({ exp: nowSeconds + 3601 })],
     ['a token under the configured kid', async () => resign({}, oldKey)],
   ])('refuses %s', async (_label, make) => {
     expect(replacementAcceptable(oldToken, await make(), nowSeconds * 1000)).toBe(false);
+  });
+
+  it.each([
+    ['under the configured kid', () => oldKey],
+    ['under a new kid', () => newKey],
+  ])('uses a renewed replacement (§ 6a, a later exp) %s', async (_label, key) => {
+    expect(replacementAcceptable(oldToken, await resign({ exp: nowSeconds + 3601 }, key()), nowSeconds * 1000)).toBe(true);
   });
 });
 
@@ -285,11 +333,21 @@ describe('pullReissuedDelegation — headers', () => {
       baseUrl: BASE_URL,
       cacheDir: dir,
       timeoutMs: GATE_CONSTANTS.blocking_attempt_timeout_ms,
+      mode: 'rotation',
       fetch: recording,
       nowMs: () => nowSeconds * 1000,
     });
     expect(result.kind).toBe('accepted');
     expect(seen.map((call) => call.url)).toEqual(expect.arrayContaining([JWKS_URI, PULL_URL]));
     for (const call of seen) expect(call.surface).toBe(SURFACE_VALUE);
+  });
+});
+
+describe('rejectionForVerification — a key set the signature step could not read is not an answer (§ 6a)', () => {
+  it.each(['jwks_unavailable', 'jwks_stale'])('%s is a failed refetch', (reason) => {
+    expect(rejectionForVerification(reason)).toEqual({ kind: 'rejected', reason: 'jwks_refetch_failed', detail: reason });
+  });
+  it.each(['invalid_signature', 'key_revoked', 'delegate_mismatch', 'expired'])('%s is an answer: verification_failed', (reason) => {
+    expect(rejectionForVerification(reason)).toEqual({ kind: 'rejected', reason: 'verification_failed', detail: reason });
   });
 });

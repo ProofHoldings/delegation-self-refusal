@@ -307,8 +307,15 @@ describe('restart: the persisted replacement record (contract § 6 Restart)', ()
   });
 
   it.each([
+    ['the configured kid', 'k-old'],
+    ['a new kid', 'k-new'],
+  ])('uses a renewed replacement (§ 6a: a later exp) under %s', (_label, kid) => {
+    const replacement = lineage({ exp: Math.floor(START / 1000) + 90_000, iat: Math.floor(START / 1000) - 60 }, kid);
+    expect(restarted(replacement).activeToken()).toBe(replacement);
+  });
+
+  it.each([
     ['another handle', { sub: 'ph_dlg_00000000000000000000000000000009', iat: Math.floor(START / 1000) - 60 }, 'k-new'],
-    ['a widened exp', { exp: Math.floor(START / 1000) + 90_000, iat: Math.floor(START / 1000) - 60 }, 'k-new'],
     ['an iat before the configured one', { iat: Math.floor(START / 1000) - 7_200 }, 'k-new'],
     ['the configured kid', { iat: Math.floor(START / 1000) - 60 }, 'k-old'],
     ['another principal', { principal: 'evil.example', iat: Math.floor(START / 1000) - 60 }, 'k-new'],
