@@ -23,6 +23,7 @@ export const REFUSAL_TEXTS = {
     identifier_unverifiable: 'cannot be checked',
     identifier_mismatch: 'names another subject',
     superseded: 'was superseded',
+    test_environment: 'was issued in test mode',
   },
   unknown_phrase: 'could not be confirmed',
 } as const;

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+### Added
+
+- The `test_environment` reason. `POST /api/v1/proofs/validate` now answers a delegation issued in
+  test mode `valid: false` with `reason: "test_environment"`: a test API key completes verifications
+  without a real check, so such a delegation proves nothing. The gate refuses it for good under its
+  own code, `test_environment` ("was issued in test mode"). 0.3.0 to 0.5.0 refuse it too, as
+  `unrecognized_refusal`.
+
 ## 0.5.0
 
 ### Added

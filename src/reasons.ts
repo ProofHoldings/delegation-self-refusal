@@ -9,6 +9,7 @@ export const BACKEND_DEFINITIVE_REASONS = [
   'identifier_unverifiable',
   'identifier_mismatch',
   'superseded',
+  'test_environment',
 ] as const;
 
 /** Definitive reasons the gate decides itself, from the token's own `exp`. */

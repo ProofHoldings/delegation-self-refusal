@@ -1,5 +1,7 @@
 # @proof-holdings/delegation-self-refusal
 
+[![Proof of Delegation](https://proof.holdings/badge/npm/@proof-holdings/delegation-self-refusal)](https://proof.holdings/npm/@proof-holdings/delegation-self-refusal)
+
 A delegated MCP server enforces its own authorization. This package holds your Proof of
 Delegation token, gates your server's tool calls on it, and caches the issuer's answer on disk — so
 a consumer who never checks anything still cannot get a tool call out of a server whose

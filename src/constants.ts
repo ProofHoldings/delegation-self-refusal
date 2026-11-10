@@ -1,4 +1,4 @@
-export const GATE_VERSION = '0.5.0';
+export const GATE_VERSION = '0.5.1';
 
 export const STATUS_TOOL_NAME = 'proof_holdings_status';
 
